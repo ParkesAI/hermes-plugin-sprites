@@ -1,5 +1,5 @@
 name: sprites
-version: 1.0.0
+version: 1.0.1
 description: Sprites terminal backend — stateful cloud sandboxes on Fly.io with checkpoint & restore
 author: Kyle McLaren (@kylemclaren) / Nous Research
 kind: backend

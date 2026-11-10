@@ -1,5 +1,9 @@
 # hermes-plugin-sprites
 
+Maintained by ParkesAI as a fork of [NousResearch/hermes-plugin-sprites](https://github.com/NousResearch/hermes-plugin-sprites). Upstream authorship and history are preserved.
+
+This fork adds a fix for Hermes-managed background commands: the launcher closes inherited input/output pipes so the Sprites exec connection returns promptly, while the job keeps its PID, log and exit-code files. Ordinary terminal commands are unchanged.
+
 Sprites terminal backend for [Hermes Agent](https://github.com/NousResearch/hermes-agent) — run agent shell commands in [Sprites](https://sprites.dev), stateful cloud sandboxes on Fly.io with checkpoint & restore.
 
 Built on the pluggable terminal-backend extension point (hermes-agent PR #94400): this plugin registers `terminal.backend: sprites` as a first-class backend across dispatch, the setup wizard, `hermes status` / `hermes doctor`, the dashboard picker, approval policy, path handling, and subprocess secret stripping — with zero changes to hermes-agent core.
@@ -8,7 +12,7 @@ Built on the pluggable terminal-backend extension point (hermes-agent PR #94400)
 
 ```bash
 # 1. Copy/clone this repo into the Hermes plugins dir
-git clone git@github.com:NousResearch/hermes-plugin-sprites.git ~/.hermes/plugins/sprites
+git clone https://github.com/ParkesAI/hermes-plugin-sprites.git ~/.hermes/plugins/sprites
 
 # 2. Install the SDK using Hermes's Python environment, not an unrelated Python
 pip install 'sprites-py>=0.5.0,<0.6'
@@ -211,7 +215,9 @@ caches copied into `~/.hermes` on the Sprite before each command) therefore:
 # Unit (no token needed): use a Hermes checkout with its test dependencies installed.
 # Run from that checkout, substituting the absolute path to this plugin:
 cd /path/to/hermes-agent
-scripts/run_tests.sh /path/to/hermes-plugin-sprites/tests/test_sprites_environment.py
+scripts/run_tests.sh \
+  /path/to/hermes-plugin-sprites/tests/test_sprites_environment.py \
+  /path/to/hermes-plugin-sprites/tests/test_background_launch.py
 ```
 
 Through `scripts/run_tests.sh`, the tests import Hermes from the checkout you
@@ -231,6 +237,8 @@ test environment's interpreter and sprites-py on `PYTHONPATH`, with
 The legacy `tests/test_sprites_terminal_live.py` still assumes the pre-plugin
 Hermes layout and is not a supported standalone live-test recipe. Its rewrite
 is deferred; do not run it against your normal Hermes profile.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the tested Hermes revision and contribution workflow.
 
 ## Attribution
 

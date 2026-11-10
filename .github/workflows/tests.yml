@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: hermes-plugin-sprites
+          persist-credentials: false
+      - name: Check out compatible Hermes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19
+          path: hermes-agent
+          persist-credentials: false
+      - name: Run credential-free unit tests
+        working-directory: hermes-agent
+        run: |
+          scripts/run_tests.sh \
+            ../hermes-plugin-sprites/tests/test_sprites_environment.py \
+            ../hermes-plugin-sprites/tests/test_background_launch.py
