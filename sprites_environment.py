@@ -1354,6 +1354,36 @@ class _ExecFailed(RuntimeError):
         super().__init__(message)
         self.exit_code = exit_code
 
+def _detach_hermes_background_launch(command: str) -> str:
+    """Close the launch group's inherited pipes, preserving Hermes' PID/log contract.
+
+    Core's process registry redirects the job, but its surrounding asynchronous
+    AND-list still owns the exec WebSocket's stdout. Recognize only that explicit
+    wrapper; ordinary commands and file-transfer calls remain untouched.
+    """
+    separator = " & echo $! > "
+    if not command.startswith("mkdir -p ") or separator not in command:
+        return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    literals = {0: "mkdir", 1: "-p", 3: "&&", 4: "(", 5: "nohup",
+                6: "bash", 7: "-lc", 9: ">", 11: "2>&1;", 12: "rc=$?;",
+                13: "printf", 14: "%s\\n", 15: "$rc", 16: ">", 18: ")",
+                19: "&", 20: "echo", 21: "$!", 22: ">", 24: "&&", 25: "cat"}
+    if len(words) != 27 or any(words[i] != value for i, value in literals.items()):
+        return command
+    pid = words[23]
+    if (words[26] != pid or not posixpath.isabs(pid)
+            or not re.fullmatch(r"hermes_bg_proc_[a-zA-Z0-9]+\.pid", posixpath.basename(pid))
+            or posixpath.dirname(pid) != words[2]
+            or words[10] != pid[:-4] + ".log" or words[17] != pid[:-4] + ".exit"):
+        return command
+    launch, suffix = command.rsplit(separator, 1)
+    return "{ " + launch + "; } </dev/null >/dev/null 2>&1" + separator + suffix
+
+
 class SpritesEnvironment(BaseEnvironment):
     """Sprites backend: stateful cloud sandboxes on Fly.io.
 
@@ -1994,6 +2024,16 @@ class SpritesEnvironment(BaseEnvironment):
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
+
+    def execute(self, command: str, cwd: str = "", *, timeout=None,
+                stdin_data=None, rewrite_compound_background=True,
+                bounded_capture=False, yield_handler=None):
+        if not rewrite_compound_background:
+            command = _detach_hermes_background_launch(command)
+        return super().execute(
+            command, cwd, timeout=timeout, stdin_data=stdin_data,
+            rewrite_compound_background=rewrite_compound_background,
+            bounded_capture=bounded_capture, yield_handler=yield_handler)
 
     def _before_execute(self) -> None:
         if self._sync_manager.closed:
