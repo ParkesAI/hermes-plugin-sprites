@@ -12,6 +12,10 @@ as sibling directories. CI pins Hermes to
 `2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`; changes to that pin should be
 reviewed alongside the resulting test run.
 
+Run the full suite on Linux: the file-transfer tests execute the same GNU shell
+utilities used inside a Sprite (including `mv -T`), which are not interchangeable
+with macOS utilities. The background-launch regression file also runs on macOS.
+
 From the Hermes checkout, run:
 
 ```bash
