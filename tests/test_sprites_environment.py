@@ -2044,27 +2044,43 @@ class TestFileSyncDelete:
 # ---------------------------------------------------------------------------
 
 class TestStdinMode:
-    def test_stdin_mode_is_heredoc(self):
-        """Ensures the base class will embed stdin via heredoc, not pipe.
+    @pytest.mark.parametrize("payload", ["", "α漢字\n'\"$()\\", "table|value\n" * 20000])
+    def test_sdk_stdin_is_byte_exact_and_outside_argv(self, make_env, payload):
+        env = make_env(task_id="stdin")
+        assert env._stdin_mode == "payload"
+        observed = []
 
-        SDK calls don't accept a real stdin stream, so the backend declares
-        ``_stdin_mode = "heredoc"`` and the base ``execute()`` wraps stdin
-        into the command string before calling ``_run_bash``.
-        """
-        # Inspect the class without constructing — no SDK needed for this check
-        import importlib
+        def command(*args, **kwargs):
+            observed.append((args, kwargs["stdin"].read()))
+            cmd = MagicMock()
+            cmd.combined_output.return_value = b"saved"
+            return cmd
 
-        # Stub the SDK so the module imports cleanly outside the make_env fixture
-        sys.modules.setdefault("sprites", types.ModuleType("sprites"))
-        sys.modules.setdefault("sprites.exceptions", types.ModuleType("sprites.exceptions"))
+        env._mock_sprite.command = command
+        handle = env._run_bash("cat > /tmp/output", stdin_data=payload, timeout=10)
+        handle.wait()
+        assert handle.returncode == 0
+        assert observed == [(("bash", "-c", "cat > /tmp/output"), payload.encode("utf-8"))]
 
-        # Force a clean import (in case earlier tests left it in sys.modules with
-        # a different SDK mocked in)
-        if "sprites_environment" in sys.modules:
-            importlib.reload(sys.modules["sprites_environment"])
-        from sprites_environment import SpritesEnvironment
+    def test_retry_receives_fresh_stdin(self, make_env):
+        env = make_env(task_id="stdin-retry")
+        observed = []
 
-        assert SpritesEnvironment._stdin_mode == "heredoc"
+        def command(*args, **kwargs):
+            observed.append(kwargs["stdin"].read())
+            cmd = MagicMock()
+            cmd.combined_output.return_value = b"saved"
+            return cmd
+
+        def retry(operation):
+            operation()
+            return operation()
+
+        env._mock_sprite.command = command
+        env._with_auth_retry = retry
+        handle = env._run_bash("cat", stdin_data="unchanged\n", timeout=10)
+        handle.wait()
+        assert observed == [b"unchanged\n", b"unchanged\n"]
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Maintained by ParkesAI as a fork of [NousResearch/hermes-plugin-sprites](https://github.com/NousResearch/hermes-plugin-sprites). Upstream authorship and history are preserved.
 
-This fork adds a fix for Hermes-managed background commands: the launcher closes inherited input/output pipes so the Sprites exec connection returns promptly, while the job keeps its PID, log and exit-code files. Ordinary terminal commands are unchanged.
+This fork fixes Hermes-managed background commands and large tool-result transfers. Background launchers close inherited input/output pipes so the Sprites exec connection returns promptly, while the job keeps its PID, log and exit-code files. Standard input uses the SDK's byte stream instead of embedding payloads in shell arguments, allowing large MCP responses to be saved intact in the sandbox.
 
 Sprites terminal backend for [Hermes Agent](https://github.com/NousResearch/hermes-agent) — run agent shell commands in [Sprites](https://sprites.dev), stateful cloud sandboxes on Fly.io with checkpoint & restore.
 

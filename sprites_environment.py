@@ -1392,7 +1392,7 @@ class SpritesEnvironment(BaseEnvironment):
     used to bound the client wait, not as a remote process-kill guarantee.
     """
 
-    _stdin_mode = "heredoc"
+    _stdin_mode = "payload"
 
     def __init__(
         self,
@@ -2063,11 +2063,15 @@ class SpritesEnvironment(BaseEnvironment):
         cmd_timeout = float(timeout) if timeout and timeout > 0 else 3600.0
 
         cmd_kwargs = self._command_kwargs()
+        input_bytes = stdin_data.encode("utf-8") if stdin_data is not None else None
 
         def run():
             # After a token switch, self._sprite is bound to the new client.
             current = self._sprite or sprite
-            return current.command(*shell_cmd, timeout=cmd_timeout, **cmd_kwargs).combined_output()
+            # Keep large tool results out of argv. Each authentication retry needs
+            # a fresh stream: the previous SDK attempt may have consumed it.
+            stdin = {"stdin": io.BytesIO(input_bytes)} if input_bytes is not None else {}
+            return current.command(*shell_cmd, timeout=cmd_timeout, **cmd_kwargs, **stdin).combined_output()
 
         def exec_fn() -> tuple[str, int]:
             try:
