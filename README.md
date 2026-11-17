@@ -240,6 +240,21 @@ is deferred; do not run it against your normal Hermes profile.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the tested Hermes revision and contribution workflow.
 
+## Reusing files during terminal attachment
+
+Each Hermes conversation has its own file-sync history, even when it attaches
+to an existing persistent Sprite. Before uploading a batch larger than one
+archive, the backend compares the staged bytes with the actual remote files in
+one bounded read-only request. Identical regular files with the expected mode
+are reused; missing, changed or unverifiable files follow the existing upload
+path. This avoids resending an unchanged skill/media cache on every attachment.
+
+The comparison stores no shared receipt and reads no file contents back to the
+host. Remote edits, credential changes and restored files are compared afresh.
+If the probe fails, returns invalid data, exceeds its bounds, or the image lacks
+Python, the full batch is uploaded normally. Deletion and transactional sync
+behavior are unchanged. No new agent tool or Hermes core modification is needed.
+
 ## Attribution
 
 The Sprites environment was authored by **Kyle McLaren** ([@kylemclaren](https://github.com/kylemclaren), Fly.io) as hermes-agent [PR #30112](https://github.com/NousResearch/hermes-agent/pull/30112) and hardened through three rounds of review in [PR #93523](https://github.com/NousResearch/hermes-agent/pull/93523) (identity digests, DNS bounds, fail-closed profile resolution, race-safe first-use create, bounded deadlines, sandboxed live test suite). Extracted to this standalone plugin repo per the hermes-agent policy that third-party service integrations ship as plugins rather than core code.

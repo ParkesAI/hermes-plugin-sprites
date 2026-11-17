@@ -18,6 +18,117 @@ from unittest.mock import MagicMock, call
 import pytest
 
 
+class TestRemoteSyncComparison:
+    """Use real files and the actual read-only probe; no cloud credentials."""
+
+    @staticmethod
+    def compare(se, files):
+        import subprocess
+        payload = se._comparison_manifest(files)
+        result = subprocess.run([sys.executable, '-c', se._COMPARE_SCRIPT, str(len(payload))],
+                                input=payload,
+                                capture_output=True, check=True, timeout=5)
+        return se._changed_sync_files(files, result.stdout)
+
+    def test_only_identical_regular_files_are_reused(self, hermes_runtime, tmp_path):
+        import sprites_environment as se
+        pairs = []
+        for name in ('same', 'changed', 'missing', 'symlink', 'mode', 'directory'):
+            host = tmp_path / ('host-'+name)
+            host.write_bytes(b'new value')
+            remote = tmp_path / ('remote-'+name)
+            if name == 'directory':
+                remote.mkdir()
+            elif name == 'symlink':
+                remote.symlink_to(host)
+            elif name != 'missing':
+                remote.write_bytes(b'old value' if name == 'changed' else b'new value')
+                remote.chmod(0o600 if name == 'mode' else 0o644)
+            pairs.append((str(host),str(remote)))
+        assert self.compare(se,pairs) == pairs[1:]
+
+    def test_remote_edit_or_restore_is_not_hidden_by_a_cached_receipt(self, hermes_runtime, tmp_path):
+        import sprites_environment as se
+        host, remote = tmp_path/'host', tmp_path/'remote'
+        host.write_bytes(b'secret-v1');remote.write_bytes(b'secret-v1');remote.chmod(0o644)
+        files=[(str(host),str(remote))]
+        assert self.compare(se,files) == []
+        host.write_bytes(b'secret-v2')
+        assert self.compare(se,files) == files
+        remote.write_bytes(b'secret-v2')
+        assert self.compare(se,files) == []
+        remote.unlink()
+        assert self.compare(se,files) == files
+
+    def test_paths_are_data_not_shell_source(self, hermes_runtime, tmp_path):
+        import sprites_environment as se
+        host=tmp_path/'host';host.write_bytes(b'contents')
+        remote=tmp_path/'quotes\' $HOME `echo bad`\n space'
+        remote.write_bytes(b'contents');remote.chmod(0o644)
+        assert self.compare(se,[(str(host),str(remote))]) == []
+
+    @pytest.mark.parametrize('response',[
+        b'not json', b'{}', b'{"version":true,"unchanged":[]}',
+        b'{"version":1,"unchanged":[true]}', b'{"version":1,"unchanged":[-1]}',
+        b'{"version":1,"unchanged":[1]}', b'{"version":1,"unchanged":[0,0]}',
+    ])
+    def test_malformed_response_cannot_skip_uploads(self, hermes_runtime, response):
+        import sprites_environment as se
+        with pytest.raises((ValueError,TypeError)):
+            se._changed_sync_files([('host','remote')],response)
+
+    def test_failed_probe_falls_back_to_upload(self, make_env, tmp_path):
+        env=make_env()
+        host=tmp_path/'host';host.write_bytes(b'contents')
+        files=[(str(host),'/remote')]
+        env._sprite.command.side_effect=RuntimeError('no python or transport failure')
+        assert env._sprite_changed_files(files) == files
+
+    def test_new_session_does_not_upload_identical_large_batch(self, make_env, tmp_path):
+        import sprites_environment as se
+        import subprocess
+        host=tmp_path/'host';host.write_bytes(b'x'*(se._SYNC_WRITE_MAX_BYTES+1))
+        remote=tmp_path/'remote';shutil.copyfile(host,remote);remote.chmod(0o644)
+        def command(*args,**kwargs):
+            result=subprocess.run([sys.executable,*args[1:]],input=kwargs['stdin'].read(),capture_output=True,check=True,timeout=5)
+            return types.SimpleNamespace(combined_output=lambda:result.stdout)
+        for _ in range(2):
+            env=make_env();env._sprite.command.side_effect=command
+            env._fs_write=MagicMock()
+            env._sprite_bulk_upload([(str(host),str(remote))])
+            env._fs_write.assert_not_called()
+
+    def test_manifest_is_bounded(self, hermes_runtime, tmp_path, monkeypatch):
+        import sprites_environment as se
+        host=tmp_path/'host';host.write_bytes(b'contents')
+        monkeypatch.setattr(se,'_COMPARE_MANIFEST_MAX_BYTES',1)
+        with pytest.raises(ValueError,match='bounded'):
+            se._comparison_manifest([(str(host),'/remote')])
+
+    def test_duplicate_destinations_preserve_normal_upload_order(self, hermes_runtime, tmp_path):
+        import sprites_environment as se
+        host=tmp_path/'host';host.write_bytes(b'contents')
+        with pytest.raises(ValueError,match='Duplicate'):
+            se._comparison_manifest([(str(host),'/remote'),(str(host),'/remote')])
+
+    def test_probe_replies_without_waiting_for_stdin_eof(self, hermes_runtime, tmp_path):
+        import selectors
+        import subprocess
+        import sprites_environment as se
+        host=tmp_path/'host';host.write_bytes(b'contents');host.chmod(0o644)
+        payload=se._comparison_manifest([(str(host),str(host))])
+        proc=subprocess.Popen([sys.executable,'-c',se._COMPARE_SCRIPT,str(len(payload))],
+                              stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        try:
+            proc.stdin.write(payload);proc.stdin.flush()
+            with selectors.DefaultSelector() as ready:
+                ready.register(proc.stdout,selectors.EVENT_READ)
+                assert ready.select(timeout=3), 'Probe waited for exec stdin to close'
+            assert json.loads(proc.stdout.readline()) == {'version':1,'unchanged':[0]}
+        finally:
+            proc.kill();proc.communicate()
+
+
 # ---------------------------------------------------------------------------
 # Mock sprites-py SDK
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ restart. Unset, ``SPRITES_TOKEN`` / ``SPRITE_TOKEN`` are read as before (see
 
 import hashlib
 import io
+import json
 import logging
 import os
 import posixpath
@@ -1199,6 +1200,87 @@ def _build_archive(files: list[tuple[str, str]]) -> bytes:
     return buf.getvalue()
 
 
+# Compare only batches larger than one archive: an extra exec is otherwise
+# unlikely to save a request. The probe uses actual remote bytes, not a receipt
+# cached across sessions, processes, Sprite restores or credential rotations.
+_COMPARE_MANIFEST_MAX_BYTES = 256 * 1024
+_COMPARE_TIMEOUT = 15
+_COMPARE_SCRIPT = r'''
+import hashlib, json, os, stat, sys
+length = int(sys.argv[1])
+if not 0 < length <= 262144:
+    raise ValueError('Invalid comparison request length')
+# Sprites exec keeps stdin open while the process is running. Read the framed
+# byte count rather than waiting for EOF before producing the response.
+request = json.loads(sys.stdin.buffer.read(length))
+if request['version'] != 1:
+    raise ValueError('Unsupported comparison version')
+unchanged = []
+for index, entry in enumerate(request['files']):
+    path = entry['path']
+    try:
+        # Do not accept a symlink or an alternate path as proof of a synced file.
+        if not os.path.isabs(path) or os.path.realpath(path) != path:
+            continue
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode)
+                    or stat.S_IMODE(before.st_mode) != 0o644
+                    or before.st_size != entry['size']):
+                continue
+            digest = hashlib.sha256()
+            for block in iter(lambda: stream.read(65536), b''):
+                digest.update(block)
+            after = os.fstat(stream.fileno())
+            current = os.lstat(path)
+            def identity(s):
+                return (s.st_dev, s.st_ino, s.st_mode, s.st_size,
+                        s.st_mtime_ns, s.st_ctime_ns)
+            if (identity(before) == identity(after) == identity(current)
+                    and digest.hexdigest() == entry['sha256']):
+                unchanged.append(index)
+    except OSError:
+        pass  # Missing/unreadable files remain in the ordinary upload batch.
+print(json.dumps({'version': 1, 'unchanged': unchanged}))
+'''
+
+
+def _comparison_manifest(files: list[tuple[str, str]]) -> bytes:
+    destinations = [remote for _, remote in files]
+    if len(set(destinations)) != len(destinations):
+        # Preserve the ordinary upload order if multiple sources target one path.
+        raise ValueError('Duplicate sync destinations cannot be compared independently')
+    entries = []
+    for host_path, remote_path in files:
+        digest = hashlib.sha256()
+        size = 0
+        with open(host_path, 'rb') as stream:
+            for block in iter(lambda: stream.read(65536), b''):
+                digest.update(block)
+                size += len(block)
+        entries.append({'path': remote_path, 'size': size,
+                        'sha256': digest.hexdigest()})
+    payload = json.dumps({'version': 1, 'files': entries}).encode()
+    if len(payload) > _COMPARE_MANIFEST_MAX_BYTES:
+        raise ValueError('Sync comparison manifest exceeds its bounded request size')
+    return payload
+
+
+def _changed_sync_files(files: list[tuple[str, str]], response: bytes) -> list[tuple[str, str]]:
+    result = json.loads(response)
+    if (not isinstance(result, dict) or set(result) != {'version', 'unchanged'}
+            or type(result['version']) is not int or result['version'] != 1
+            or not isinstance(result['unchanged'], list)):
+        raise ValueError('Invalid sync comparison response')
+    indices = result['unchanged']
+    if (any(type(i) is not int or not 0 <= i < len(files) for i in indices)
+            or len(set(indices)) != len(indices)):
+        raise ValueError('Invalid sync comparison indices')
+    unchanged = set(indices)
+    return [pair for i, pair in enumerate(files) if i not in unchanged]
+
+
 #: Archives and upload directories not modified for this long are taken to
 #: be leftovers of a sync that never finished (transport failure, killed
 #: process) and are removed by a later sync's sweep.
@@ -1943,6 +2025,12 @@ class SpritesEnvironment(BaseEnvironment):
         (``_sprite_upload_chunked``), on this path and the one-by-one path
         alike. Every file passed in is written, or this raises.
         """
+        # A new session has no FileSyncManager history, even when its persistent
+        # Sprite already has every file. Avoid sending that entire cache again.
+        # Keep the staged-byte/transaction contract: skipped bytes were freshly
+        # compared, and any unknown result falls back to the normal upload.
+        if sum(Path(host).stat().st_size for host, _ in files) > _SYNC_WRITE_MAX_BYTES:
+            files = self._sprite_changed_files(files)
         batches, chunked = _archive_batches(files)
         for batch in batches:
             if not self._use_archives:
@@ -1980,6 +2068,28 @@ class SpritesEnvironment(BaseEnvironment):
                     self._sprite_upload(host_path, remote_path)
         for host_path, remote_path in chunked:
             self._sprite_upload_chunked(host_path, remote_path)
+
+    def _sprite_changed_files(self, files: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        try:
+            payload = _comparison_manifest(files)
+
+            def compare():
+                # A fresh stream is required if authentication refresh retries.
+                return self._sprite.command(
+                    'python3', '-c', _COMPARE_SCRIPT, str(len(payload)),
+                    stdin=io.BytesIO(payload), timeout=_COMPARE_TIMEOUT,
+                    **self._command_kwargs(),
+                ).combined_output()
+
+            changed = _changed_sync_files(files, self._with_auth_retry(compare))
+        except Exception:
+            # Older/custom images may lack Python; failed or malformed probes
+            # must never turn unknown remote state into a successful no-op.
+            logger.debug('Sprites: remote file comparison unavailable; uploading batch')
+            return files
+        logger.info('Sprites: file comparison reused %d of %d synced files',
+                    len(files) - len(changed), len(files))
+        return changed
 
     def _exec_or_raise(self, script: str, timeout: float, what: str) -> None:
         """Run ``script`` with ``sh -c``; a non-zero exit raises ``_ExecFailed``."""
